@@ -388,13 +388,15 @@ def release_and_protect(backend, root, rels_to_release):
     return released
 
 
-def chmod_file(path, writable):
+def chmod_path(path, writable):
     try:
         mode = path.stat().st_mode
     except OSError:
         return
     if writable:
         mode |= stat.S_IWUSR
+        if path.is_dir():
+            mode |= stat.S_IXUSR
     else:
         mode &= ~stat.S_IWUSR
     try:
@@ -405,15 +407,21 @@ def chmod_file(path, writable):
 
 def set_tree_writable(path, writable):
     if path.is_file() or path.is_symlink():
-        chmod_file(path, writable)
+        parent = path.parent
+        if parent.is_dir():
+            set_tree_writable(parent, writable)
+        else:
+            chmod_path(path, writable)
         return
     if path.is_dir():
+        chmod_path(path, writable)
         for cur, _dirs, files in os.walk(path):
             cur_path = Path(cur)
             if cur_path.name in {".git", ".svn", ".aivivc"}:
                 continue
+            chmod_path(cur_path, writable)
             for name in files:
-                chmod_file(cur_path / name, writable)
+                chmod_path(cur_path / name, writable)
 
 
 def git_tracked_files(root, rels_to_query):
@@ -433,7 +441,7 @@ def set_git_paths_writable(root, rels_to_query, writable):
             set_tree_writable(root / rel, writable)
         return
     for path in files:
-        chmod_file(path, writable)
+        set_tree_writable(path, writable)
 
 
 def set_paths_writable(backend, root, rels_to_query, paths, writable):
@@ -466,14 +474,14 @@ def protect_git_paths(root, rels_to_query, checked_rels):
         for path in files:
             rel = rel_to_root(root, path)
             if not rel_checked_out_by_me(rel, checked_rels):
-                chmod_file(path, False)
+                set_tree_writable(path, False)
         return
 
     for rel in rels_to_query:
         path = root / rel
         if path.is_file() or path.is_symlink():
             if not rel_checked_out_by_me(rel, checked_rels):
-                chmod_file(path, False)
+                set_tree_writable(path, False)
             continue
         if path.is_dir():
             for cur, _dirs, files in os.walk(path):
@@ -484,7 +492,7 @@ def protect_git_paths(root, rels_to_query, checked_rels):
                     file_path = cur_path / name
                     file_rel = rel_to_root(root, file_path)
                     if not rel_checked_out_by_me(file_rel, checked_rels):
-                        chmod_file(file_path, False)
+                        set_tree_writable(file_path, False)
 
 
 def protect_tree_paths(root, paths, checked_rels):
@@ -492,7 +500,7 @@ def protect_tree_paths(root, paths, checked_rels):
         rel = rel_to_root(root, path)
         if path.is_file() or path.is_symlink():
             if not rel_checked_out_by_me(rel, checked_rels):
-                chmod_file(path, False)
+                set_tree_writable(path, False)
             continue
         if path.is_dir():
             for cur, _dirs, files in os.walk(path):
@@ -503,7 +511,17 @@ def protect_tree_paths(root, paths, checked_rels):
                     file_path = cur_path / name
                     file_rel = rel_to_root(root, file_path)
                     if not rel_checked_out_by_me(file_rel, checked_rels):
-                        chmod_file(file_path, False)
+                        set_tree_writable(file_path, False)
+
+
+def checkout_scope_path(path):
+    if path.is_dir():
+        return path
+    if path.is_file() or path.is_symlink():
+        return path.parent
+    if path.suffix:
+        return path.parent
+    return path
 
 
 def protect_paths(backend, root, paths):
@@ -694,6 +712,8 @@ def message(opts):
 
 def do_git(cmd, root, paths, opts):
     rs = rels(root, paths)
+    scope_paths = [checkout_scope_path(p) for p in paths]
+    scope_rels = rels(root, scope_paths)
     if cmd == "status":
         records = [status_record("git", root, p) for p in paths]
         for rec in records:
@@ -723,16 +743,16 @@ def do_git(cmd, root, paths, opts):
         ok = ok and run_noop_ok([GIT_COMMAND, "-C", str(root), "commit", "-m",
                                  message(opts), "--", *rs])
         if ok:
-            release_and_protect("git", root, rs)
+            release_and_protect("git", root, scope_rels)
         return ok
     if cmd == "co":
-        for rel in rs:
+        for rel in scope_rels:
             if overlap_checked_out_by_other("git", root, rel):
                 print(f"{rel}: Locked (Other check out)")
                 return False
-        for rel in rs:
+        for rel in scope_rels:
             mark_checked_out("git", root, rel)
-        set_paths_writable("git", root, rs, paths, True)
+        set_paths_writable("git", root, scope_rels, scope_paths, True)
         return True
     if cmd == "update":
         ok = run([GIT_COMMAND, "-C", str(root), "pull", "--ff-only"], ok=(0, 1))
@@ -740,13 +760,13 @@ def do_git(cmd, root, paths, opts):
         ok = ok and (not ver or run([GIT_COMMAND, "-C", str(root), "checkout", ver,
                                      "--", *rs]))
         if ok:
-            protect_clean_paths("git", root, paths)
+            protect_clean_paths("git", root, scope_paths)
         return ok
     if cmd == "cancel":
         ok = run([GIT_COMMAND, "-C", str(root), "checkout", "--", *rs], ok=(0, 1))
         ok = run([GIT_COMMAND, "-C", str(root), "clean", "-fd", "--", *rs], ok=(0, 1)) and ok
         if ok:
-            release_and_protect("git", root, rs)
+            release_and_protect("git", root, scope_rels)
         return ok
     if cmd == "delete":
         ok = run([GIT_COMMAND, "-C", str(root), "rm", "-r", "--", *rs])
@@ -754,7 +774,7 @@ def do_git(cmd, root, paths, opts):
             clear_checked_out_overlaps("git", root, rs)
         return ok
     if cmd == "protect":
-        protect_clean_paths("git", root, paths)
+        protect_clean_paths("git", root, scope_paths)
         return True
     return False
 
@@ -762,6 +782,8 @@ def do_git(cmd, root, paths, opts):
 def do_svn(cmd, root, paths, opts):
     ps = [str(p) for p in paths]
     rs = rels(root, paths)
+    scope_paths = [checkout_scope_path(p) for p in paths]
+    scope_rels = rels(root, scope_paths)
     if cmd == "status":
         records = [status_record("svn", root, p) for p in paths]
         for rec in records:
@@ -790,16 +812,16 @@ def do_svn(cmd, root, paths, opts):
                   *ps], ok=(0, 1))
         ok = ok and run_noop_ok([SVN_COMMAND, "commit", "-m", message(opts), *ps])
         if ok:
-            release_and_protect("svn", root, rs)
+            release_and_protect("svn", root, scope_rels)
         return ok
     if cmd == "co":
-        for rel in rs:
+        for rel in scope_rels:
             if overlap_checked_out_by_other("svn", root, rel):
                 print(f"{rel}: Locked (Other check out)")
                 return False
-        for rel in rs:
+        for rel in scope_rels:
             mark_checked_out("svn", root, rel)
-        set_paths_writable("svn", root, rs, paths, True)
+        set_paths_writable("svn", root, scope_rels, scope_paths, True)
         return True
     if cmd == "update":
         args = [SVN_COMMAND, "update"]
@@ -807,7 +829,7 @@ def do_svn(cmd, root, paths, opts):
             args += ["-r", opts["version"]]
         ok = run(args + ps)
         if ok:
-            protect_clean_paths("svn", root, paths)
+            protect_clean_paths("svn", root, scope_paths)
         return ok
     if cmd == "cancel":
         args = [SVN_COMMAND, "revert"]
@@ -815,7 +837,7 @@ def do_svn(cmd, root, paths, opts):
             args.append("-R")
         ok = run(args + ps)
         if ok:
-            release_and_protect("svn", root, rs)
+            release_and_protect("svn", root, scope_rels)
         return ok
     if cmd == "delete":
         ok = run([SVN_COMMAND, "delete", *ps])
@@ -823,7 +845,7 @@ def do_svn(cmd, root, paths, opts):
             clear_checked_out_overlaps("svn", root, rs)
         return ok
     if cmd == "protect":
-        protect_clean_paths("svn", root, paths)
+        protect_clean_paths("svn", root, scope_paths)
         return True
     return False
 
