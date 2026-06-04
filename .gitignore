@@ -1,0 +1,30 @@
+# Local Codex/session files
+.agents/
+.codex/
+skills/
+memory/
+docs/
+
+# Required project files hidden by the parent OpenClaw ignore rules
+!build/
+!build/**
+!data/
+!data/plugins/
+!data/plugins/*.plg
+
+# Build products
+lib/
+src/lib/
+*.o
+*.pic.o
+*.d
+*.a
+*.so
+*-datestamp.o
+
+# Runtime/cache files
+__pycache__/
+*.py[cod]
+*.log
+*.tmp
+*~

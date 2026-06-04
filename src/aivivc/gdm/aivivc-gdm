@@ -1,0 +1,853 @@
+#!/usr/bin/env python3
+"""Minimal GDM-style Git/SVN bridge for AIVIVC."""
+
+import os
+import shlex
+import socket
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+
+COMMANDS = {"status", "status-code", "history", "ci", "submit", "co", "update",
+            "cancel", "delete", "protect"}
+FLAGS_WITH_VALUE = {"-cdslib", "-lib", "-file", "-xtra", "-name", "-version",
+                    "-desc", "-comment", "-message"}
+GIT_COMMAND = os.environ.get("AIVIVC_GIT_COMMAND") or os.environ.get("AIVIVC_GIT") or "git"
+SVN_COMMAND = os.environ.get("AIVIVC_SVN_COMMAND") or os.environ.get("AIVIVC_SVN") or "svn"
+
+
+def run(argv, cwd=None, ok=(0,)):
+    proc = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT)
+    if proc.stdout:
+        print(proc.stdout, end="")
+    return proc.returncode in ok
+
+
+def run_noop_ok(argv, cwd=None):
+    proc = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT)
+    output = proc.stdout or ""
+    if output:
+        print(output, end="")
+    if proc.returncode == 0:
+        return True
+    lowered = output.lower()
+    return ("nothing to commit" in lowered or
+            "no changes added" in lowered or
+            "no changes to commit" in lowered)
+
+
+def capture(argv, cwd=None):
+    proc = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def capture_status(argv, cwd=None):
+    proc = subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT)
+    return proc.returncode, proc.stdout or ""
+
+
+def find_cdslib(explicit):
+    if explicit:
+        return Path(explicit).resolve()
+    cur = Path.cwd().resolve()
+    for path in (cur, *cur.parents):
+        candidate = path / "cds.lib"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def parse_cdslib(path, seen=None):
+    libs = {}
+    if not path or not path.exists():
+        return libs
+    seen = seen or set()
+    path = path.resolve()
+    if path in seen:
+        return libs
+    seen.add(path)
+    base = path.parent
+    for raw in path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = shlex.split(line, comments=True, posix=True)
+        if not parts:
+            continue
+        key = parts[0].upper()
+        if key == "DEFINE" and len(parts) >= 3:
+            lib_path = Path(os.path.expandvars(parts[2])).expanduser()
+            if not lib_path.is_absolute():
+                lib_path = base / lib_path
+            libs[parts[1]] = lib_path.resolve()
+        elif key in {"INCLUDE", "SOFTINCLUDE"} and len(parts) >= 2:
+            inc = Path(os.path.expandvars(parts[1])).expanduser()
+            if not inc.is_absolute():
+                inc = base / inc
+            libs.update(parse_cdslib(inc, seen))
+    return libs
+
+
+def split_libspec(spec):
+    slash = spec.find("/")
+    colon = spec.find(":")
+    dot = spec.find(".")
+    if slash > 0 and (dot < 0 or slash < dot) and (colon < 0 or slash < colon):
+        return spec[:slash], None, None, spec[slash + 1:]
+
+    first = len(spec)
+    for idx in (dot, colon, slash):
+        if idx >= 0:
+            first = min(first, idx)
+    lib = spec[:first]
+    rest = spec[first:]
+    cell = view = file_name = None
+
+    if rest.startswith("."):
+        rest = rest[1:]
+        end = len(rest)
+        for token in (":", "/"):
+            idx = rest.find(token)
+            if idx >= 0:
+                end = min(end, idx)
+        cell = rest[:end] or None
+        rest = rest[end:]
+    if rest.startswith(":"):
+        rest = rest[1:]
+        end = rest.find("/")
+        if end < 0:
+            view = rest or None
+            rest = ""
+        else:
+            view = rest[:end] or None
+            rest = rest[end:]
+    if rest.startswith("/"):
+        file_name = rest[1:] or None
+    return lib, cell, view, file_name
+
+
+def resolve_libspec(spec, libs):
+    lib, cell, view, file_name = split_libspec(spec)
+    if lib not in libs:
+        raise SystemExit(f"aivivc-gdm: library not found in cds.lib: {lib}")
+    path = libs[lib]
+    for part in (cell, view, file_name):
+        if part:
+            path = path / part
+    return path
+
+
+def parse_args(argv):
+    opts = {"files": [], "libspecs": [], "recurse": False, "xtra": []}
+    mode = "file"
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "-help":
+            usage(0)
+        if arg == "-recurse":
+            opts["recurse"] = True
+            i += 1
+            continue
+        if arg in FLAGS_WITH_VALUE:
+            if i + 1 >= len(argv):
+                raise SystemExit(f"aivivc-gdm: missing value for {arg}")
+            val = argv[i + 1]
+            if arg == "-cdslib":
+                opts["cdslib"] = val
+            elif arg == "-lib":
+                mode = "lib"
+                opts["libspecs"].append(val)
+            elif arg == "-file":
+                mode = "file"
+                opts["files"].append(val)
+            elif arg == "-xtra":
+                opts["xtra"].append(val)
+            else:
+                opts[arg[1:]] = val
+            i += 2
+            continue
+        if arg.startswith("-"):
+            opts[arg[1:]] = True
+        elif mode == "lib":
+            opts["libspecs"].append(arg)
+        else:
+            opts["files"].append(arg)
+        i += 1
+    return opts
+
+
+def backend_for(path):
+    probe = path if path.is_dir() else path.parent
+    top = capture([GIT_COMMAND, "-C", str(probe), "rev-parse", "--show-toplevel"])
+    if top:
+        return "git", Path(top)
+    for candidate in (probe, *probe.parents):
+        info = capture([SVN_COMMAND, "info", str(candidate)])
+        if info and ("Working Copy Root Path" in info or "Repository Root" in info):
+            root = svn_root_from_info(info)
+            return "svn", Path(root) if root else candidate
+    raise SystemExit(f"aivivc-gdm: no Git/SVN work area found for {path}")
+
+
+def rel_to_root(root, path):
+    try:
+        return str(path.resolve().relative_to(root))
+    except ValueError:
+        return str(path.resolve())
+
+
+def checkout_key(rel):
+    text = rel if rel and rel != "." else "__root__"
+    return text.encode("utf-8", "surrogateescape").hex()
+
+
+def current_identity():
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or "unknown"
+    host = socket.gethostname() or "unknown"
+    return f"{user}@{host}"
+
+
+def git_marker_path(root, rel):
+    key = checkout_key(rel)
+    out = capture([GIT_COMMAND, "-C", str(root), "rev-parse", "--git-path",
+                   f"aivivc/checkout/{key}"])
+    if not out:
+        return root / ".git" / "aivivc" / "checkout" / key
+    path = Path(out)
+    if not path.is_absolute():
+        path = root / path
+    return path
+
+
+def marker_path(backend, root, rel):
+    if backend == "git":
+        return git_marker_path(root, rel)
+    return root / ".aivivc" / "checkout" / checkout_key(rel)
+
+
+def marker_dir(backend, root):
+    if backend == "git":
+        out = capture([GIT_COMMAND, "-C", str(root), "rev-parse", "--git-path",
+                       "aivivc/checkout"])
+        if out:
+            path = Path(out)
+            return path if path.is_absolute() else root / path
+        return root / ".git" / "aivivc" / "checkout"
+    return root / ".aivivc" / "checkout"
+
+
+def read_marker(backend, root, rel):
+    path = marker_path(backend, root, rel)
+    try:
+        return path.read_text(errors="ignore").strip()
+    except OSError:
+        return ""
+
+
+def marker_owner_from_text(text):
+    for line in text.splitlines():
+        if line.startswith("owner="):
+            return line.split("=", 1)[1].strip()
+    return text.strip()
+
+
+def marker_owner(backend, root, rel):
+    return marker_owner_from_text(read_marker(backend, root, rel))
+
+
+def marker_rel_from_text(text, fallback_key):
+    for line in text.splitlines():
+        if line.startswith("rel="):
+            value = line.split("=", 1)[1].strip()
+            return "." if value in {"", "__root__"} else value
+    try:
+        decoded = bytes.fromhex(fallback_key).decode("utf-8", "surrogateescape")
+        return "." if decoded in {"", "__root__"} else decoded
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def marker_entries(backend, root):
+    path = marker_dir(backend, root)
+    if not path.is_dir():
+        return []
+    entries = []
+    for item in path.iterdir():
+        if not item.is_file():
+            continue
+        try:
+            text = item.read_text(errors="ignore").strip()
+        except OSError:
+            continue
+        rel = marker_rel_from_text(text, item.name)
+        if rel:
+            entries.append((normalize_rel(rel), marker_owner_from_text(text)))
+    return entries
+
+
+def checked_out_rels_by_me(backend, root):
+    mine = set()
+    for rel, owner in marker_entries(backend, root):
+        if owner == current_identity():
+            mine.add(rel)
+    return mine
+
+
+def parent_rels(rel):
+    rel = normalize_rel(rel)
+    parents = []
+    cur = rel
+    while True:
+        parents.append(cur)
+        if cur == ".":
+            break
+        slash = cur.rfind("/")
+        cur = cur[:slash] if slash >= 0 else "."
+    return parents
+
+
+def effective_marker_owner(backend, root, rel):
+    owners = {marker_rel: owner for marker_rel, owner in marker_entries(backend, root)}
+    for candidate in parent_rels(rel):
+        owner = owners.get(candidate, "")
+        if owner:
+            return owner
+    return ""
+
+
+def overlap_checked_out_by_other(backend, root, rel):
+    target = normalize_rel(rel)
+    me = current_identity()
+    for marker_rel, owner in marker_entries(backend, root):
+        if (owner and owner != me and
+                (rel_is_under(target, marker_rel) or rel_is_under(marker_rel, target))):
+            return True
+    return False
+
+
+def is_checked_out_by_me(backend, root, rel):
+    owner = effective_marker_owner(backend, root, rel)
+    return bool(owner) and owner == current_identity()
+
+
+def is_checked_out_by_other(backend, root, rel):
+    owner = effective_marker_owner(backend, root, rel)
+    return bool(owner) and owner != current_identity()
+
+
+def mark_checked_out(backend, root, rel):
+    path = marker_path(backend, root, rel)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"owner={current_identity()}\nrel={rel}\n")
+
+
+def clear_checked_out(backend, root, rel):
+    path = marker_path(backend, root, rel)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def clear_checked_out_overlaps(backend, root, rels_to_clear):
+    targets = [normalize_rel(rel) for rel in rels_to_clear]
+    released = []
+    me = current_identity()
+    for marker_rel, owner in marker_entries(backend, root):
+        if owner != me:
+            continue
+        if any(rel_is_under(marker_rel, target) or rel_is_under(target, marker_rel)
+               for target in targets):
+            clear_checked_out(backend, root, marker_rel)
+            released.append(marker_rel)
+    return released
+
+
+def path_for_rel(root, rel):
+    rel = normalize_rel(rel)
+    return root if rel == "." else root / rel
+
+
+def release_and_protect(backend, root, rels_to_release):
+    released = clear_checked_out_overlaps(backend, root, rels_to_release)
+    protect_rels = sorted(set(normalize_rel(rel) for rel in rels_to_release + released))
+    protect_paths_to_set = [path_for_rel(root, rel) for rel in protect_rels]
+    if protect_rels:
+        set_paths_writable(backend, root, protect_rels, protect_paths_to_set, False)
+    for rel in released:
+        print(f"{rel}: checkout released")
+    return released
+
+
+def chmod_file(path, writable):
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return
+    if writable:
+        mode |= stat.S_IWUSR
+    else:
+        mode &= ~stat.S_IWUSR
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
+
+
+def set_tree_writable(path, writable):
+    if path.is_file() or path.is_symlink():
+        chmod_file(path, writable)
+        return
+    if path.is_dir():
+        for cur, _dirs, files in os.walk(path):
+            cur_path = Path(cur)
+            if cur_path.name in {".git", ".svn", ".aivivc"}:
+                continue
+            for name in files:
+                chmod_file(cur_path / name, writable)
+
+
+def git_tracked_files(root, rels_to_query):
+    args = [GIT_COMMAND, "-C", str(root), "ls-files", "-z", "--", *rels_to_query]
+    proc = subprocess.run(args, text=False, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL)
+    if proc.returncode != 0:
+        return []
+    return [root / item.decode("utf-8", "surrogateescape")
+            for item in proc.stdout.split(b"\0") if item]
+
+
+def set_git_paths_writable(root, rels_to_query, writable):
+    files = git_tracked_files(root, rels_to_query)
+    if not files:
+        for rel in rels_to_query:
+            set_tree_writable(root / rel, writable)
+        return
+    for path in files:
+        chmod_file(path, writable)
+
+
+def set_paths_writable(backend, root, rels_to_query, paths, writable):
+    if backend == "git":
+        set_git_paths_writable(root, rels_to_query, writable)
+        return
+    for path in paths:
+        set_tree_writable(path, writable)
+
+
+def normalize_rel(rel):
+    if not rel or rel == ".":
+        return "."
+    return rel.strip("/")
+
+
+def rel_is_under(rel, ancestor):
+    rel = normalize_rel(rel)
+    ancestor = normalize_rel(ancestor)
+    return ancestor == "." or rel == ancestor or rel.startswith(ancestor + "/")
+
+
+def rel_checked_out_by_me(rel, checked_rels):
+    return any(rel_is_under(rel, checked_rel) for checked_rel in checked_rels)
+
+
+def protect_git_paths(root, rels_to_query, checked_rels):
+    files = git_tracked_files(root, rels_to_query)
+    if files:
+        for path in files:
+            rel = rel_to_root(root, path)
+            if not rel_checked_out_by_me(rel, checked_rels):
+                chmod_file(path, False)
+        return
+
+    for rel in rels_to_query:
+        path = root / rel
+        if path.is_file() or path.is_symlink():
+            if not rel_checked_out_by_me(rel, checked_rels):
+                chmod_file(path, False)
+            continue
+        if path.is_dir():
+            for cur, _dirs, files in os.walk(path):
+                cur_path = Path(cur)
+                if cur_path.name in {".git", ".svn", ".aivivc"}:
+                    continue
+                for name in files:
+                    file_path = cur_path / name
+                    file_rel = rel_to_root(root, file_path)
+                    if not rel_checked_out_by_me(file_rel, checked_rels):
+                        chmod_file(file_path, False)
+
+
+def protect_tree_paths(root, paths, checked_rels):
+    for path in paths:
+        rel = rel_to_root(root, path)
+        if path.is_file() or path.is_symlink():
+            if not rel_checked_out_by_me(rel, checked_rels):
+                chmod_file(path, False)
+            continue
+        if path.is_dir():
+            for cur, _dirs, files in os.walk(path):
+                cur_path = Path(cur)
+                if cur_path.name in {".git", ".svn", ".aivivc"}:
+                    continue
+                for name in files:
+                    file_path = cur_path / name
+                    file_rel = rel_to_root(root, file_path)
+                    if not rel_checked_out_by_me(file_rel, checked_rels):
+                        chmod_file(file_path, False)
+
+
+def protect_paths(backend, root, paths):
+    checked_rels = checked_out_rels_by_me(backend, root)
+    if backend == "git":
+        protect_git_paths(root, rels(root, paths), checked_rels)
+        return
+    protect_tree_paths(root, paths, checked_rels)
+
+
+def git_path_changed(root, rel):
+    rc, out = capture_status([GIT_COMMAND, "-C", str(root), "status",
+                              "--porcelain=v1", "--", rel or "."])
+    if rc != 0:
+        return False, False, False
+    modified = False
+    deleted = False
+    untracked = False
+    for line in out.splitlines():
+        if not line:
+            continue
+        x = line[0] if len(line) > 0 else " "
+        y = line[1] if len(line) > 1 else " "
+        if x == "?" and y == "?":
+            untracked = True
+        if x == "D" or y == "D" or x == "!" or y == "!":
+            deleted = True
+        if x in "AMRC" or y in "AMRC":
+            modified = True
+    return modified or untracked or deleted, modified or untracked, deleted
+
+
+def git_path_managed(root, rel):
+    if capture([GIT_COMMAND, "-C", str(root), "ls-files", "--error-unmatch",
+                "--", rel or "."]) is not None:
+        return True
+    out = capture([GIT_COMMAND, "-C", str(root), "ls-files", "--", rel or "."])
+    return bool(out)
+
+
+def git_update_needed(root):
+    out = capture([GIT_COMMAND, "-C", str(root), "status", "-sb"])
+    if not out:
+        return False
+    first = out.splitlines()[0] if out.splitlines() else ""
+    return ("behind" in first) or ("diverged" in first) or ("gone" in first)
+
+
+def svn_path_changed(path):
+    rc, out = capture_status([SVN_COMMAND, "status", "-u", str(path)])
+    if rc != 0:
+        return False, False, False
+    modified = deleted = untracked = False
+    for line in out.splitlines():
+        if not line or line.startswith("Status against revision:"):
+            continue
+        c = line[0]
+        if c == "?":
+            untracked = True
+        if c in {"!", "D"}:
+            deleted = True
+        if c in {"A", "M", "R", "~"}:
+            modified = True
+    return modified or untracked or deleted, modified or untracked, deleted
+
+
+def svn_path_managed(path):
+    return capture([SVN_COMMAND, "info", str(path)]) is not None
+
+
+def svn_update_needed(path):
+    rc, out = capture_status([SVN_COMMAND, "status", "-u", str(path)])
+    if rc != 0:
+        return False
+    for line in out.splitlines():
+        if len(line) > 8 and line[8] == "*":
+            return True
+    return False
+
+
+def status_record(backend, root, path):
+    rel = rel_to_root(root, path)
+    exists = path.exists()
+    is_dir = path.is_dir()
+    if backend == "git":
+        managed = git_path_managed(root, rel)
+        changed, modified, deleted = git_path_changed(root, rel)
+        update_needed = git_update_needed(root)
+    else:
+        managed = svn_path_managed(path)
+        changed, modified, deleted = svn_path_changed(path)
+        update_needed = svn_update_needed(path)
+
+    by_me = is_checked_out_by_me(backend, root, rel)
+    by_other = is_checked_out_by_other(backend, root, rel)
+
+    if managed and not by_me and exists:
+        protect_paths(backend, root, [path])
+
+    writable = os.access(path, os.W_OK) if exists else False
+
+    if by_other:
+        display = "LOCKED"
+        label = "Locked (Other check out)"
+        co = "COE"
+    elif update_needed:
+        display = "OUT_OF_DATE"
+        label = "Out of date"
+        co = ""
+    elif by_me:
+        display = "CHECKED_OUT"
+        label = "Check out"
+        co = "CO"
+    elif managed:
+        display = "CHECKED_IN"
+        label = "Check in"
+        co = ""
+    else:
+        display = "UN_MANAGED_CELL" if exists else "UNMANAGED"
+        label = "Unmanaged" if exists else "Missing"
+        co = ""
+
+    perm = "WRITE" if by_me and writable else "READ"
+    if deleted or not exists:
+        del_status = "DEL"
+    else:
+        del_status = ""
+    return {
+        "path": str(path),
+        "rel": rel,
+        "exists": exists,
+        "dir": is_dir,
+        "managed": managed,
+        "changed": changed,
+        "modified": modified,
+        "deleted": deleted or not exists,
+        "update": update_needed,
+        "checkout": by_me,
+        "locked": by_other,
+        "writable": writable,
+        "display": display,
+        "label": label,
+        "co": co,
+        "perm": perm,
+        "mod_status": "MOD" if modified else "",
+        "del_status": del_status,
+    }
+
+
+def protect_clean_paths(backend, root, paths):
+    protect_paths(backend, root, paths)
+
+
+def svn_root_from_info(info):
+    if info:
+        root = None
+        for line in info.splitlines():
+            if line.startswith("Working Copy Root Path:"):
+                root = line.split(":", 1)[1].strip()
+                break
+        return root
+    return None
+
+
+def collect_paths(opts):
+    libs = parse_cdslib(find_cdslib(opts.get("cdslib")))
+    paths = [resolve_libspec(spec, libs) for spec in opts["libspecs"]]
+    paths += [Path(p).resolve() for p in opts["files"]]
+    if not paths:
+        paths = [Path.cwd().resolve()]
+    return paths
+
+
+def rels(root, paths):
+    result = []
+    for path in paths:
+        try:
+            result.append(str(path.resolve().relative_to(root)))
+        except ValueError:
+            result.append(str(path.resolve()))
+    return result
+
+
+def message(opts):
+    return (opts.get("desc") or opts.get("comment") or opts.get("message") or
+            os.environ.get("AIVIVC_COMMIT_MSG") or "AIVIVC GDM commit")
+
+
+def do_git(cmd, root, paths, opts):
+    rs = rels(root, paths)
+    if cmd == "status":
+        records = [status_record("git", root, p) for p in paths]
+        for rec in records:
+            print(f"{rec['rel']}: {rec['label']}")
+            if rec["modified"] and not rec["checkout"]:
+                print("  warning: modified without checkout")
+        return True
+    if cmd == "status-code":
+        rec = status_record("git", root, paths[0])
+        print(" ".join([
+            f"display={rec['display']}",
+            f"co={rec['co']}",
+            f"perm={rec['perm']}",
+            f"modified={1 if rec['modified'] else 0}",
+            f"deleted={1 if rec['deleted'] else 0}",
+            f"update={1 if rec['update'] else 0}",
+            f"managed={1 if rec['managed'] else 0}",
+            f"dir={1 if rec['dir'] else 0}",
+            f"label={shlex.quote(rec['label'])}",
+        ]))
+        return True
+    if cmd == "history":
+        return run([GIT_COMMAND, "-C", str(root), "log", "--oneline", "--decorate",
+                    "-n", "30", "--", *rs])
+    if cmd == "ci":
+        ok = run([GIT_COMMAND, "-C", str(root), "add", "--", *rs])
+        ok = ok and run_noop_ok([GIT_COMMAND, "-C", str(root), "commit", "-m",
+                                 message(opts), "--", *rs])
+        if ok:
+            release_and_protect("git", root, rs)
+        return ok
+    if cmd == "co":
+        for rel in rs:
+            if overlap_checked_out_by_other("git", root, rel):
+                print(f"{rel}: Locked (Other check out)")
+                return False
+        for rel in rs:
+            mark_checked_out("git", root, rel)
+        set_paths_writable("git", root, rs, paths, True)
+        return True
+    if cmd == "update":
+        ok = run([GIT_COMMAND, "-C", str(root), "pull", "--ff-only"], ok=(0, 1))
+        ver = opts.get("version")
+        ok = ok and (not ver or run([GIT_COMMAND, "-C", str(root), "checkout", ver,
+                                     "--", *rs]))
+        if ok:
+            protect_clean_paths("git", root, paths)
+        return ok
+    if cmd == "cancel":
+        ok = run([GIT_COMMAND, "-C", str(root), "checkout", "--", *rs], ok=(0, 1))
+        ok = run([GIT_COMMAND, "-C", str(root), "clean", "-fd", "--", *rs], ok=(0, 1)) and ok
+        if ok:
+            release_and_protect("git", root, rs)
+        return ok
+    if cmd == "delete":
+        ok = run([GIT_COMMAND, "-C", str(root), "rm", "-r", "--", *rs])
+        if ok:
+            clear_checked_out_overlaps("git", root, rs)
+        return ok
+    if cmd == "protect":
+        protect_clean_paths("git", root, paths)
+        return True
+    return False
+
+
+def do_svn(cmd, root, paths, opts):
+    ps = [str(p) for p in paths]
+    rs = rels(root, paths)
+    if cmd == "status":
+        records = [status_record("svn", root, p) for p in paths]
+        for rec in records:
+            print(f"{rec['rel']}: {rec['label']}")
+            if rec["modified"] and not rec["checkout"]:
+                print("  warning: modified without checkout")
+        return True
+    if cmd == "status-code":
+        rec = status_record("svn", root, paths[0])
+        print(" ".join([
+            f"display={rec['display']}",
+            f"co={rec['co']}",
+            f"perm={rec['perm']}",
+            f"modified={1 if rec['modified'] else 0}",
+            f"deleted={1 if rec['deleted'] else 0}",
+            f"update={1 if rec['update'] else 0}",
+            f"managed={1 if rec['managed'] else 0}",
+            f"dir={1 if rec['dir'] else 0}",
+            f"label={shlex.quote(rec['label'])}",
+        ]))
+        return True
+    if cmd == "history":
+        return run([SVN_COMMAND, "log", "-l", "30", *ps])
+    if cmd == "ci":
+        ok = run([SVN_COMMAND, "add", "--force", "--parents", "--depth", "infinity",
+                  *ps], ok=(0, 1))
+        ok = ok and run_noop_ok([SVN_COMMAND, "commit", "-m", message(opts), *ps])
+        if ok:
+            release_and_protect("svn", root, rs)
+        return ok
+    if cmd == "co":
+        for rel in rs:
+            if overlap_checked_out_by_other("svn", root, rel):
+                print(f"{rel}: Locked (Other check out)")
+                return False
+        for rel in rs:
+            mark_checked_out("svn", root, rel)
+        set_paths_writable("svn", root, rs, paths, True)
+        return True
+    if cmd == "update":
+        args = [SVN_COMMAND, "update"]
+        if opts.get("version"):
+            args += ["-r", opts["version"]]
+        ok = run(args + ps)
+        if ok:
+            protect_clean_paths("svn", root, paths)
+        return ok
+    if cmd == "cancel":
+        args = [SVN_COMMAND, "revert"]
+        if any(p.is_dir() for p in paths):
+            args.append("-R")
+        ok = run(args + ps)
+        if ok:
+            release_and_protect("svn", root, rs)
+        return ok
+    if cmd == "delete":
+        ok = run([SVN_COMMAND, "delete", *ps])
+        if ok:
+            clear_checked_out_overlaps("svn", root, rs)
+        return ok
+    if cmd == "protect":
+        protect_clean_paths("svn", root, paths)
+        return True
+    return False
+
+
+def usage(status):
+    print("usage: aivivc-gdm <status|status-code|history|ci|co|update|cancel|delete|protect> [GDM args]")
+    print("       supports -lib lib.cell:view/file, -file path, -cdslib file, -recurse")
+    raise SystemExit(status)
+
+
+def main(argv):
+    if not argv or argv[0] in {"-help", "--help"}:
+        usage(0)
+    cmd = argv[0]
+    if cmd not in COMMANDS:
+        usage(2)
+    if cmd == "submit":
+        cmd = "ci"
+    opts = parse_args(argv[1:])
+    paths = collect_paths(opts)
+    backend, root = backend_for(paths[0])
+    ok = do_git(cmd, root, paths, opts) if backend == "git" else do_svn(cmd, root, paths, opts)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

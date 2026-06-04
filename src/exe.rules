@@ -1,0 +1,40 @@
+ifeq ($(strip $(PROJ_NAME)),)
+  $(error PROJ_NAME must be defined before including exe.rules)
+endif
+
+EXE_NAME := $(PROJ_NAME)
+EXE_TARGET := $(OBJDIR)/$(EXE_NAME)
+
+EXE_SRC := $(if $(strip $(PROJ_CPPFILES)),$(PROJ_CPPFILES),$(wildcard *.cpp))
+EXE_OBJS := $(patsubst %.cpp,$(OBJDIR)/%.o,$(filter %.cpp,$(EXE_SRC)))
+EXE_OBJS += $(patsubst %.c,$(OBJDIR)/%.o,$(filter %.c,$(EXE_SRC)))
+EXE_DEPS := $(EXE_OBJS:.o=.d)
+
+EXE_CPPFLAGS := $(DEFINES) -I. $(PROJ_INCLUDES)
+EXE_LINKFLAGS := $(LDFLAGS) $(LIB_LDFLAGS) $(EXE_LDFLAGS)
+EXE_LINKLIBS := $(addprefix -l,$(EXE_LDNAMES)) $(EXE_LDLIBS) $(LDLIBS_COMMON)
+
+default: all
+
+all: $(EXE_TARGET)
+
+$(OBJDIR)/%.o: %.cpp | $(OBJDIR)
+	@echo "Compiling C++ file $< ($(OPTMODE))"
+	$(CXX) $(EXE_CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJDIR)/%.o: %.c | $(OBJDIR)
+	@echo "Compiling C file $< ($(OPTMODE))"
+	$(CC) $(EXE_CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
+
+$(EXE_TARGET): $(EXE_OBJS)
+	@echo "Creating $@"
+	$(CXX) $(EXE_LINKFLAGS) -o $@ $^ $(EXE_LINKLIBS)
+
+install: all
+
+clean:
+	$(RM) -r $(OBJDIR)
+
+.PHONY: default all install clean
+
+-include $(EXE_DEPS)

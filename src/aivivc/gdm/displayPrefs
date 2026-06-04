@@ -1,0 +1,82 @@
+<!DOCTYPE CDS_DISPLAY_PREFS>
+<DISPLAY_PREFS>
+  <DISPLAY NAME="AIVIVC">
+    <ICON NAME="min-icon-big.png"/>
+    <COLOR>
+      <RED>255</RED>
+      <GREEN>85</GREEN>
+      <BLUE>0</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="CHECKED_IN">
+    <ICON NAME="checked-in.png"/>
+    <COLOR>
+      <RED>0</RED>
+      <GREEN>85</GREEN>
+      <BLUE>0</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="CHECKED_OUT">
+    <ICON NAME="checked-out.png"/>
+    <COLOR>
+      <RED>255</RED>
+      <GREEN>0</GREEN>
+      <BLUE>0</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="OUT_OF_DATE">
+    <ICON NAME="out-of-date.png"/>
+    <COLOR>
+      <RED>170</RED>
+      <GREEN>0</GREEN>
+      <BLUE>255</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="NOTLATEST">
+    <ICON NAME="not-latest.png"/>
+    <COLOR>
+      <RED>0</RED>
+      <GREEN>0</GREEN>
+      <BLUE>255</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="UNMANAGED">
+    <ICON NAME="unmanaged-library.png"/>
+    <COLOR>
+      <RED>85</RED>
+      <GREEN>0</GREEN>
+      <BLUE>255</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="read_only_libs">
+    <COLOR>
+      <RED>170</RED>
+      <GREEN>0</GREEN>
+      <BLUE>0</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="LOCKED">
+    <ICON NAME="locked.png"/>
+    <COLOR>
+      <RED>85</RED>
+      <GREEN>0</GREEN>
+      <BLUE>0</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="UN_MANAGED_CELL">
+    <ICON NAME="unmanaged-object.png"/>
+    <COLOR>
+      <RED>83</RED>
+      <GREEN>0</GREEN>
+      <BLUE>200</BLUE>
+    </COLOR>
+  </DISPLAY>
+  <DISPLAY NAME="ci">
+    <ICON NAME="checked-in.png"/>
+    <COLOR>
+      <RED>0</RED>
+      <GREEN>85</GREEN>
+      <BLUE>0</BLUE>
+    </COLOR>
+  </DISPLAY>
+</DISPLAY_PREFS>

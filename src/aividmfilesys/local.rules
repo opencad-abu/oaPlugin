@@ -1,0 +1,2 @@
+LIB_LDFLAGS += -L$(ROOT)/lib/aividmfilesysbase/$(SYSNAME)/$(OPTMODE)
+LIB_LDFLAGS += -L$(OA_EXTERNAL_LIB_DIR)

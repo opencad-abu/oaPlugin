@@ -1,0 +1,7 @@
+LIB_LDFLAGS += -L$(ROOT)/lib/common/$(SYSNAME)/$(OPTMODE)
+LIB_LDFLAGS += -L$(ROOT)/lib/plugIn/$(SYSNAME)/$(OPTMODE)
+LIB_LDFLAGS += -L$(ROOT)/lib/base/$(SYSNAME)/$(OPTMODE)
+LIB_LDFLAGS += -L$(ROOT)/lib/dm/$(SYSNAME)/$(OPTMODE)
+OACPP ?= $(abspath $(ROOT)/../../oacpp)
+OACPP_LIBDIR ?= $(OACPP)/lib/$(SYSNAME)/$(OPTMODE)
+LIB_LDFLAGS += -L$(OACPP_LIBDIR)

@@ -1,0 +1,7 @@
+################################################################################
+# Hfiles.defs — Public headers for oaDMFileSys module
+################################################################################
+
+HFILES = \
+	oaDMFileSysComp.h \
+	oaDMFileSysTypes.h

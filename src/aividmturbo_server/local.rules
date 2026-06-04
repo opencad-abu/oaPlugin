@@ -1,0 +1,5 @@
+LIB_LDFLAGS += -L$(ROOT)/lib/aividmturbobase/$(SYSNAME)/$(OPTMODE)
+LIB_LDFLAGS += -L$(ROOT)/lib/aividmturbo/$(SYSNAME)/$(OPTMODE)
+LIB_LDFLAGS += -L$(OA_EXTERNAL_LIB_DIR)
+
+EXE_LDNAMES := oaAiviDMTurboBase oaCommon oaPlugIn oaBase oaDM oaAiviDMTurbo

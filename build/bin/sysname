@@ -1,0 +1,34 @@
+#!/bin/sh
+# Minimal platform probe for oaPlugin builds.
+
+show_usage() {
+    echo "Usage: sysname [-h|-m|-b]" >&2
+}
+
+case "${1:-}" in
+    -h)
+        show_usage
+        exit 0
+        ;;
+    -m|-b|"")
+        ;;
+    *)
+        show_usage
+        exit 1
+        ;;
+esac
+
+os=$(uname -s 2>/dev/null || echo unknown)
+machine=$(uname -m 2>/dev/null || echo unknown)
+
+case "$os:$machine" in
+    Linux:x86_64|Linux:amd64)
+        sysname=linux_rhel90
+        ;;
+    *)
+        echo "Unsupported platform: $os $machine" >&2
+        exit 1
+        ;;
+esac
+
+echo "$sysname"

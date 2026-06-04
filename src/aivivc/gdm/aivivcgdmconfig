@@ -1,0 +1,36 @@
+#!/bin/sh
+
+showcmd=0
+showver=0
+
+case "$1" in
+  "")
+    showcmd=1
+    showver=1
+    ;;
+  -commands)
+    showcmd=1
+    ;;
+  -version)
+    showver=1
+    ;;
+  *)
+    echo "Invalid Option" >&2
+    exit 1
+    ;;
+esac
+
+if [ "$showver" = 1 ]; then
+  echo "nam aivivc"
+  echo 'ver "1"'
+  echo 'bld "jun 3 2026"'
+fi
+
+if [ "$showcmd" = 1 ]; then
+  echo "ci"
+  echo "co"
+  echo "update force"
+  echo "cancel"
+  echo "statusOptions updateNeeded"
+  echo "history"
+fi

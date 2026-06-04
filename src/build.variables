@@ -1,0 +1,39 @@
+# Minimal build variables for oaPlugin modules.
+
+RELEASE := 03.01
+
+OPTMODE ?= opt
+SYSNAME ?= $(shell $(ROOT)/../build/bin/sysname)_64
+BIT := $(if $(findstring _64,$(SYSNAME)),64,32)
+
+CC ?= gcc
+CXX ?= g++
+AR ?= ar
+RM ?= rm -f
+MKDIR_P ?= mkdir -p
+
+OA_INC ?= $(abspath $(ROOT)/../../oa22.61-devel/include)
+OACPP ?= $(abspath $(ROOT)/../../oacpp)
+OA_EXTERNAL_LIB_DIR ?= $(OACPP)/lib/$(SYSNAME)/$(OPTMODE)
+
+COMMON_DEFINES := -DoaDynamic -D_REENTRANT -DLINUX -DBUILD_PLATFORM=\"$(SYSNAME)\"
+DEFINES ?= $(COMMON_DEFINES)
+
+MODE_CFLAGS := -O3
+
+COMMON_CFLAGS := -m$(BIT) $(MODE_CFLAGS)
+
+CFLAGS ?=
+CFLAGS += $(COMMON_CFLAGS)
+
+CXXFLAGS ?=
+CXXFLAGS += $(COMMON_CFLAGS) -fsigned-char -std=c++17 \
+             -D_GLIBCXX_USE_CXX11_ABI=1 \
+             -Wstrict-aliasing -Wstrict-overflow=1 -Warray-bounds \
+             -Wreturn-type -Wsequence-point -Wtrigraphs \
+             -Wuninitialized -Wclobbered
+
+LDFLAGS ?=
+LDFLAGS += -m$(BIT)
+
+LDLIBS_COMMON ?= -lm -ldl -lpthread

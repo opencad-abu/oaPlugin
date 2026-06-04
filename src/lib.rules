@@ -1,0 +1,47 @@
+ifeq ($(strip $(PROJ_NAME)),)
+  $(error PROJ_NAME must be defined before including lib.rules)
+endif
+
+LIB_NAME := lib$(PROJ_NAME)
+LIB_SO := $(OBJDIR)/$(LIB_NAME).so
+LIB_A := $(OBJDIR)/$(LIB_NAME).a
+
+LIB_SRC := $(if $(strip $(PROJ_CPPFILES)),$(PROJ_CPPFILES),$(wildcard *.cpp))
+LIB_SRC += $(LIB_SRC_EXTRA)
+LIB_SRC := $(sort $(LIB_SRC))
+LIB_OBJS := $(patsubst %.cpp,$(OBJDIR)/%.pic.o,$(filter %.cpp,$(LIB_SRC)))
+LIB_OBJS += $(patsubst %.c,$(OBJDIR)/%.pic.o,$(filter %.c,$(LIB_SRC)))
+LIB_DEPS := $(LIB_OBJS:.pic.o=.d)
+
+LIB_CPPFLAGS := $(DEFINES) -I. $(PROJ_INCLUDES)
+LIB_LINKFLAGS := $(LDFLAGS) $(LIB_LDFLAGS)
+LIB_LINKLIBS := $(addprefix -l,$(LIB_LDNAMES)) $(LIB_LDLIBS) $(LDLIBS_COMMON)
+
+default: all
+
+all: $(LIB_A) $(LIB_SO)
+
+$(OBJDIR)/%.pic.o: %.cpp | $(OBJDIR)
+	@echo "Compiling C++ file $< ($(OPTMODE) + pic)"
+	$(CXX) $(LIB_CPPFLAGS) $(CXXFLAGS) -fPIC -MMD -MP -c $< -o $@
+
+$(OBJDIR)/%.pic.o: %.c | $(OBJDIR)
+	@echo "Compiling C file $< ($(OPTMODE) + pic)"
+	$(CC) $(LIB_CPPFLAGS) $(CFLAGS) -fPIC -MMD -MP -c $< -o $@
+
+$(LIB_A): $(LIB_OBJS)
+	@echo "Creating $@"
+	$(AR) rcs $@ $^
+
+$(LIB_SO): $(LIB_OBJS)
+	@echo "Creating $@"
+	$(CXX) $(LIB_LINKFLAGS) -shared -o $@ $^ $(LIB_LINKLIBS)
+
+install: all
+
+clean:
+	$(RM) -r $(OBJDIR)
+
+.PHONY: default all install clean
+
+-include $(LIB_DEPS)

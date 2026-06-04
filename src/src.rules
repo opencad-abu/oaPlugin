@@ -1,0 +1,5 @@
+SRC_DIR := $(notdir $(CURDIR))
+OBJDIR := $(ROOT)/lib/$(SRC_DIR)/$(SYSNAME)/$(OPTMODE)
+
+$(OBJDIR):
+	$(MKDIR_P) $@
