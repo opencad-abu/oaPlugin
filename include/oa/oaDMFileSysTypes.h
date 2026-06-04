@@ -1,8 +1,3 @@
-// *****************************************************************************
-// oaDMFileSysTypes.h — Internal types and constants
-//
-// Reverse-engineered from liboaDMFileSys.so v22.61.p005
-// *****************************************************************************
 
 #ifndef OADMFILESYS_TYPES_H
 #define OADMFILESYS_TYPES_H

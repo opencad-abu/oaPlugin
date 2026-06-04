@@ -1,6 +1,3 @@
-// *****************************************************************************
-// oaDMFileSysComp.h — using REAL OA headers for ABI compatibility
-// *****************************************************************************
 
 #ifndef OADMFILESYS_COMP_H
 #define OADMFILESYS_COMP_H
